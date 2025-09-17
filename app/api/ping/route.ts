@@ -3,6 +3,9 @@ export async function GET() {
     headers: {
       'Content-Type': 'text/plain',
       'Cache-Control': 'no-cache',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET',
+      'Access-Control-Allow-Headers': 'Content-Type',
     },
   });
 }
