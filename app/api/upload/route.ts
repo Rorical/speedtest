@@ -1,33 +1,67 @@
 import { NextRequest } from 'next/server';
 
+export const runtime = 'nodejs';
+
+const bytesToMbps = (bytes: number, seconds: number) => {
+  if (seconds <= 0) {
+    return 0;
+  }
+
+  return (bytes * 8) / (seconds * 1024 * 1024);
+};
+
 export async function POST(request: NextRequest) {
   try {
-    const startTime = Date.now();
+    if (!request.body) {
+      return Response.json(
+        { success: false, error: 'No upload body received' },
+        {
+          status: 400,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'POST',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          },
+        }
+      );
+    }
 
-    // Read the uploaded data
-    const arrayBuffer = await request.arrayBuffer();
-    const uploadSize = arrayBuffer.byteLength;
+    const reader = request.body.getReader();
+    let bytesReceived = 0;
+    const start = performance.now();
 
-    const endTime = Date.now();
-    const duration = (endTime - startTime) / 1000; // Convert to seconds
+    while (true) {
+      const { done, value } = await reader.read();
 
-    // Calculate upload speed in Mbps
-    const speedBps = uploadSize / duration; // Bytes per second
-    const speedMbps = (speedBps * 8) / (1024 * 1024); // Convert to Mbps
+      if (done) {
+        break;
+      }
 
-    return Response.json({
-      success: true,
-      uploadSize,
-      duration,
-      speedMbps: Math.round(speedMbps * 100) / 100,
-    }, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST',
-        'Access-Control-Allow-Headers': 'Content-Type',
+      if (value) {
+        bytesReceived += value.length;
+      }
+    }
+
+    const durationSeconds = (performance.now() - start) / 1000;
+    const speedMbps = bytesToMbps(bytesReceived, durationSeconds);
+
+    return Response.json(
+      {
+        success: true,
+        uploadSize: bytesReceived,
+        duration: durationSeconds,
+        speedMbps: Number(speedMbps.toFixed(2)),
       },
-    });
+      {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'POST',
+          'Access-Control-Allow-Headers': 'Content-Type',
+        },
+      }
+    );
   } catch (error) {
+    console.error('Upload handler failed', error);
     return Response.json(
       { success: false, error: 'Upload failed' },
       {

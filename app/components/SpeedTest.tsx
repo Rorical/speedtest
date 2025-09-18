@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 interface SpeedTestData {
   stage: string;
@@ -9,6 +9,45 @@ interface SpeedTestData {
   upload: number;
   error?: string;
 }
+
+const PING_ATTEMPTS = 7;
+
+const DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024; // 8MB
+const DOWNLOAD_PASSES = 3;
+const MIN_DOWNLOAD_DURATION_MS = 3000;
+const MAX_DOWNLOAD_DURATION_MS = 15000;
+const MIN_DOWNLOAD_BYTES = 5 * 1024 * 1024; // 5MB
+
+const UPLOAD_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB
+const UPLOAD_PASSES = 3;
+const MIN_UPLOAD_DURATION_MS = 3000;
+const MAX_UPLOAD_DURATION_MS = 15000;
+const MIN_UPLOAD_BYTES = 1 * 1024 * 1024; // 1MB
+
+const bytesToMbps = (bytes: number, seconds: number) => {
+  if (seconds <= 0) {
+    return 0;
+  }
+
+  return (bytes * 8) / (seconds * 1024 * 1024);
+};
+
+const trimmedAverage = (values: number[]) => {
+  if (values.length === 0) {
+    return 0;
+  }
+
+  if (values.length <= 2) {
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const trimmed = sorted.slice(1, -1);
+
+  return trimmed.reduce((sum, value) => sum + value, 0) / trimmed.length;
+};
+
+const roundMbps = (value: number) => Number(value.toFixed(2));
 
 export default function SpeedTest() {
   const [isRunning, setIsRunning] = useState(false);
@@ -19,41 +58,233 @@ export default function SpeedTest() {
     upload: 0,
   });
 
+  const runPingTest = async () => {
+    const latencies: number[] = [];
+
+    for (let i = 0; i < PING_ATTEMPTS; i++) {
+      const start = performance.now();
+      const response = await fetch('/api/ping', { cache: 'no-store' });
+
+      if (!response.ok) {
+        throw new Error(`Ping request failed with status ${response.status}`);
+      }
+
+      await response.text();
+
+      const latency = performance.now() - start;
+      latencies.push(latency);
+
+      setData((previous) => ({
+        ...previous,
+        stage: 'ping',
+        ping: Math.round(latency),
+      }));
+    }
+
+    const average = Math.round(trimmedAverage(latencies));
+
+    setData((previous) => ({
+      ...previous,
+      stage: 'ping',
+      ping: average,
+    }));
+
+    return average;
+  };
+
+  const runDownloadTest = async () => {
+    const passSpeeds: number[] = [];
+
+    const executePass = async () => {
+      const passStart = performance.now();
+      let bytesReceived = 0;
+      let shouldStop = false;
+
+      while (!shouldStop) {
+        const response = await fetch(`/api/download?size=${DOWNLOAD_CHUNK_SIZE}`, {
+          cache: 'no-store',
+        });
+
+        if (!response.ok) {
+          throw new Error(`Download request failed with status ${response.status}`);
+        }
+
+        if (!response.body) {
+          throw new Error('Streaming download is not supported in this browser');
+        }
+
+        const reader = response.body.getReader();
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+
+            if (done) {
+              break;
+            }
+
+            if (value) {
+              bytesReceived += value.length;
+              const elapsedMs = performance.now() - passStart;
+              const elapsedSeconds = elapsedMs / 1000;
+
+              if (elapsedSeconds > 0) {
+                const currentSpeed = bytesToMbps(bytesReceived, elapsedSeconds);
+
+                setData((previous) => ({
+                  ...previous,
+                  stage: 'download',
+                  download: roundMbps(currentSpeed),
+                }));
+              }
+
+              if (
+                (bytesReceived >= MIN_DOWNLOAD_BYTES &&
+                  elapsedMs >= MIN_DOWNLOAD_DURATION_MS) ||
+                elapsedMs >= MAX_DOWNLOAD_DURATION_MS
+              ) {
+                shouldStop = true;
+                await reader.cancel().catch(() => undefined);
+                break;
+              }
+            }
+          }
+        } finally {
+          try {
+            reader.releaseLock();
+          } catch {
+            // ignore release errors
+          }
+        }
+
+        if (shouldStop) {
+          break;
+        }
+      }
+
+      const totalSeconds = (performance.now() - passStart) / 1000;
+      return roundMbps(bytesToMbps(bytesReceived, totalSeconds));
+    };
+
+    for (let pass = 0; pass < DOWNLOAD_PASSES; pass++) {
+      const speed = await executePass();
+      passSpeeds.push(speed);
+
+      const aggregated = trimmedAverage(passSpeeds);
+      setData((previous) => ({
+        ...previous,
+        stage: 'download',
+        download: roundMbps(aggregated),
+      }));
+    }
+
+    return roundMbps(trimmedAverage(passSpeeds));
+  };
+
+  const runUploadTest = async () => {
+    const passSpeeds: number[] = [];
+
+    const executePass = async () => {
+      const passStart = performance.now();
+      let bytesSent = 0;
+
+      while (true) {
+        const payload = new Uint8Array(UPLOAD_CHUNK_SIZE);
+        crypto.getRandomValues(payload);
+
+        const response = await fetch('/api/upload', {
+          method: 'POST',
+          body: payload,
+          headers: {
+            'Content-Type': 'application/octet-stream',
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Upload request failed with status ${response.status}`);
+        }
+
+        try {
+          await response.json();
+        } catch {
+          // ignore JSON parse errors, the upload already completed
+        }
+
+        bytesSent += payload.length;
+        const elapsedMs = performance.now() - passStart;
+        const elapsedSeconds = elapsedMs / 1000;
+
+        if (elapsedSeconds > 0) {
+          const currentSpeed = bytesToMbps(bytesSent, elapsedSeconds);
+
+          setData((previous) => ({
+            ...previous,
+            stage: 'upload',
+            upload: roundMbps(currentSpeed),
+          }));
+        }
+
+        if (
+          (bytesSent >= MIN_UPLOAD_BYTES && elapsedMs >= MIN_UPLOAD_DURATION_MS) ||
+          elapsedMs >= MAX_UPLOAD_DURATION_MS
+        ) {
+          break;
+        }
+      }
+
+      const totalSeconds = (performance.now() - passStart) / 1000;
+      return roundMbps(bytesToMbps(bytesSent, totalSeconds));
+    };
+
+    for (let pass = 0; pass < UPLOAD_PASSES; pass++) {
+      const speed = await executePass();
+      passSpeeds.push(speed);
+
+      const aggregated = trimmedAverage(passSpeeds);
+      setData((previous) => ({
+        ...previous,
+        stage: 'upload',
+        upload: roundMbps(aggregated),
+      }));
+    }
+
+    return roundMbps(trimmedAverage(passSpeeds));
+  };
+
   const startSpeedTest = async () => {
+    if (isRunning) {
+      return;
+    }
+
     setIsRunning(true);
     setData({ stage: 'starting', ping: 0, download: 0, upload: 0 });
 
     try {
-      const response = await fetch('/api/speedtest');
-      const reader = response.body?.getReader();
+      setData((previous) => ({
+        ...previous,
+        stage: 'ping',
+        ping: 0,
+        download: 0,
+        upload: 0,
+      }));
+      const ping = await runPingTest();
 
-      if (!reader) {
-        throw new Error('Failed to get response reader');
-      }
+      setData((previous) => ({ ...previous, ping }));
 
-      while (true) {
-        const { done, value } = await reader.read();
+      setData((previous) => ({ ...previous, stage: 'download', download: 0 }));
+      const download = await runDownloadTest();
 
-        if (done) break;
+      setData((previous) => ({ ...previous, download }));
 
-        const chunk = new TextDecoder().decode(value);
-        const lines = chunk.split('\n');
+      setData((previous) => ({ ...previous, stage: 'upload', upload: 0 }));
+      const upload = await runUploadTest();
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const newData = JSON.parse(line.slice(6));
-              setData(newData);
-
-              if (newData.stage === 'complete' || newData.stage === 'error') {
-                setIsRunning(false);
-              }
-            } catch (e) {
-              console.error('Failed to parse SSE data:', e);
-            }
-          }
-        }
-      }
+      setData({
+        stage: 'complete',
+        ping,
+        download,
+        upload,
+      });
     } catch (error) {
       console.error('Speed test failed:', error);
       setData({
@@ -61,8 +292,9 @@ export default function SpeedTest() {
         ping: 0,
         download: 0,
         upload: 0,
-        error: 'Failed to connect to speed test server',
+        error: error instanceof Error ? error.message : 'Speed test failed',
       });
+    } finally {
       setIsRunning(false);
     }
   };
@@ -210,20 +442,20 @@ export default function SpeedTest() {
           {/* How It Works */}
           <div className="glass-container p-6">
             <h3 className="text-xl font-semibold mb-4 text-white">How It Works</h3>
-            <div className="space-y-3 text-blue-200 text-sm">
-              <p>
-                <strong>Ping Test:</strong> Measures the time it takes for data to travel from your device to our server and back.
-              </p>
-              <p>
-                <strong>Download Test:</strong> Downloads test data in progressive chunks (512KB, 1MB, 2MB) to measure your download speed.
-              </p>
-              <p>
-                <strong>Upload Test:</strong> Uploads generated test data to our server to measure your upload speed.
-              </p>
-              <p>
-                All tests use real data transfer to provide accurate measurements of your actual network performance.
-              </p>
-            </div>
+              <div className="space-y-3 text-blue-200 text-sm">
+                <p>
+                  <strong>Ping Test:</strong> Measures the time it takes for data to travel from your device to our server and back.
+                </p>
+                <p>
+                  <strong>Download Test:</strong> Streams pseudo-random data in large chunks until time and volume targets are reached, averaging multiple passes for stability.
+                </p>
+                <p>
+                  <strong>Upload Test:</strong> Sends randomized payloads repeatedly until both byte and time thresholds are satisfied to capture sustained throughput.
+                </p>
+                <p>
+                  All tests use real data transfer to provide accurate measurements of your actual network performance.
+                </p>
+              </div>
           </div>
 
           {/* Understanding Results */}

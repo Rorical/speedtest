@@ -1,22 +1,42 @@
+import { randomFillSync } from 'crypto';
 import { NextRequest } from 'next/server';
+
+export const runtime = 'nodejs';
+export const revalidate = 0;
+
+const DEFAULT_SIZE = 16 * 1024 * 1024; // 16MB
+const MAX_SIZE = 256 * 1024 * 1024; // 256MB cap to avoid runaway allocation
+const STREAM_CHUNK_SIZE = 64 * 1024; // 64KB
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
-  const size = parseInt(url.searchParams.get('size') || '1048576'); // Default 1MB
+  const requestedSize = Number.parseInt(url.searchParams.get('size') ?? '') || DEFAULT_SIZE;
+  const totalBytes = Math.min(Math.max(requestedSize, STREAM_CHUNK_SIZE), MAX_SIZE);
 
-  // Generate random data for download test
-  const buffer = new ArrayBuffer(size);
-  const view = new Uint8Array(buffer);
+  let bytesSent = 0;
 
-  // Fill with random data
-  for (let i = 0; i < size; i++) {
-    view[i] = Math.floor(Math.random() * 256);
-  }
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const remaining = totalBytes - bytesSent;
 
-  return new Response(buffer, {
+      if (remaining <= 0) {
+        controller.close();
+        return;
+      }
+
+      const chunkSize = Math.min(STREAM_CHUNK_SIZE, remaining);
+      const chunk = Buffer.allocUnsafe(chunkSize);
+      randomFillSync(chunk);
+
+      controller.enqueue(chunk);
+      bytesSent += chunkSize;
+    },
+  });
+
+  return new Response(stream, {
     headers: {
       'Content-Type': 'application/octet-stream',
-      'Content-Length': size.toString(),
+      'Content-Length': totalBytes.toString(),
       'Cache-Control': 'no-cache, no-store, must-revalidate',
       'Pragma': 'no-cache',
       'Expires': '0',
