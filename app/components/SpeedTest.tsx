@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 interface SpeedTestData {
   stage: string;
@@ -9,6 +9,18 @@ interface SpeedTestData {
   upload: number;
   error?: string;
 }
+
+const PING_ATTEMPTS = 5;
+const DOWNLOAD_SIZES = [1 * 1024 * 1024, 2 * 1024 * 1024, 4 * 1024 * 1024];
+const UPLOAD_SIZES = [512 * 1024, 1024 * 1024, 2 * 1024 * 1024];
+
+const bytesToMbps = (bytes: number, seconds: number) => {
+  if (seconds <= 0) {
+    return 0;
+  }
+
+  return (bytes * 8) / (seconds * 1024 * 1024);
+};
 
 export default function SpeedTest() {
   const [isRunning, setIsRunning] = useState(false);
@@ -19,41 +31,167 @@ export default function SpeedTest() {
     upload: 0,
   });
 
+  const runPingTest = async () => {
+    const latencies: number[] = [];
+
+    for (let i = 0; i < PING_ATTEMPTS; i++) {
+      const start = performance.now();
+      const response = await fetch('/api/ping', { cache: 'no-store' });
+
+      if (!response.ok) {
+        throw new Error(`Ping request failed with status ${response.status}`);
+      }
+
+      await response.text();
+
+      const latency = performance.now() - start;
+      latencies.push(latency);
+
+      setData((previous) => ({
+        ...previous,
+        stage: 'ping',
+        ping: Math.round(latency),
+      }));
+    }
+
+    let processed = latencies;
+    if (latencies.length > 2) {
+      processed = [...latencies].sort((a, b) => a - b).slice(1, -1);
+    }
+
+    const average =
+      processed.reduce((sum, value) => sum + value, 0) / processed.length;
+
+    return Math.round(average);
+  };
+
+  const runDownloadTest = async () => {
+    let bytesReceived = 0;
+    const testStart = performance.now();
+
+    for (const size of DOWNLOAD_SIZES) {
+      const response = await fetch(`/api/download?size=${size}`, {
+        cache: 'no-store',
+      });
+
+      if (!response.ok) {
+        throw new Error(`Download request failed with status ${response.status}`);
+      }
+
+      if (!response.body) {
+        throw new Error('Streaming download is not supported in this browser');
+      }
+
+      const reader = response.body.getReader();
+
+      // Read the stream chunk by chunk to update the measured speed progressively
+      // This mirrors how commercial speed tests surface data in real time.
+      let isDone = false;
+      while (!isDone) {
+        const { done, value } = await reader.read();
+        isDone = done ?? false;
+
+        if (value) {
+          bytesReceived += value.length;
+          const elapsedSeconds = (performance.now() - testStart) / 1000;
+
+          if (elapsedSeconds > 0) {
+            const speed = bytesToMbps(bytesReceived, elapsedSeconds);
+
+            setData((previous) => ({
+              ...previous,
+              stage: 'download',
+              download: Number(speed.toFixed(2)),
+            }));
+          }
+        }
+      }
+
+      reader.releaseLock();
+    }
+
+    const totalSeconds = (performance.now() - testStart) / 1000;
+    const averageSpeed = bytesToMbps(bytesReceived, totalSeconds);
+
+    return Number(averageSpeed.toFixed(2));
+  };
+
+  const runUploadTest = async () => {
+    let bytesSent = 0;
+    const testStart = performance.now();
+
+    for (const size of UPLOAD_SIZES) {
+      const payload = new Uint8Array(size);
+      crypto.getRandomValues(payload);
+
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: payload,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload request failed with status ${response.status}`);
+      }
+
+      await response.json();
+
+      bytesSent += size;
+      const elapsedSeconds = (performance.now() - testStart) / 1000;
+
+      if (elapsedSeconds > 0) {
+        const speed = bytesToMbps(bytesSent, elapsedSeconds);
+
+        setData((previous) => ({
+          ...previous,
+          stage: 'upload',
+          upload: Number(speed.toFixed(2)),
+        }));
+      }
+    }
+
+    const totalSeconds = (performance.now() - testStart) / 1000;
+    const averageSpeed = bytesToMbps(bytesSent, totalSeconds);
+
+    return Number(averageSpeed.toFixed(2));
+  };
+
   const startSpeedTest = async () => {
+    if (isRunning) {
+      return;
+    }
+
     setIsRunning(true);
     setData({ stage: 'starting', ping: 0, download: 0, upload: 0 });
 
     try {
-      const response = await fetch('/api/speedtest');
-      const reader = response.body?.getReader();
+      setData((previous) => ({
+        ...previous,
+        stage: 'ping',
+        ping: 0,
+        download: 0,
+        upload: 0,
+      }));
+      const ping = await runPingTest();
 
-      if (!reader) {
-        throw new Error('Failed to get response reader');
-      }
+      setData((previous) => ({ ...previous, ping }));
 
-      while (true) {
-        const { done, value } = await reader.read();
+      setData((previous) => ({ ...previous, stage: 'download' }));
+      const download = await runDownloadTest();
 
-        if (done) break;
+      setData((previous) => ({ ...previous, download }));
 
-        const chunk = new TextDecoder().decode(value);
-        const lines = chunk.split('\n');
+      setData((previous) => ({ ...previous, stage: 'upload' }));
+      const upload = await runUploadTest();
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const newData = JSON.parse(line.slice(6));
-              setData(newData);
-
-              if (newData.stage === 'complete' || newData.stage === 'error') {
-                setIsRunning(false);
-              }
-            } catch (e) {
-              console.error('Failed to parse SSE data:', e);
-            }
-          }
-        }
-      }
+      setData({
+        stage: 'complete',
+        ping,
+        download,
+        upload,
+      });
     } catch (error) {
       console.error('Speed test failed:', error);
       setData({
@@ -61,8 +199,9 @@ export default function SpeedTest() {
         ping: 0,
         download: 0,
         upload: 0,
-        error: 'Failed to connect to speed test server',
+        error: error instanceof Error ? error.message : 'Speed test failed',
       });
+    } finally {
       setIsRunning(false);
     }
   };
@@ -215,7 +354,7 @@ export default function SpeedTest() {
                 <strong>Ping Test:</strong> Measures the time it takes for data to travel from your device to our server and back.
               </p>
               <p>
-                <strong>Download Test:</strong> Downloads test data in progressive chunks (512KB, 1MB, 2MB) to measure your download speed.
+                <strong>Download Test:</strong> Downloads test data in progressive chunks (1MB, 2MB, 4MB) to measure your download speed.
               </p>
               <p>
                 <strong>Upload Test:</strong> Uploads generated test data to our server to measure your upload speed.

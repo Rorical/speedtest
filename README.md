@@ -1,12 +1,12 @@
 # NekoProof SpeedTest Service
 
-A modern, glassmorphism-styled speed test application built with Next.js, featuring real-time network performance testing with Server-Sent Events.
+A modern, glassmorphism-styled speed test application built with Next.js, featuring real-time network performance testing that runs directly in the browser.
 
 ## Features
 
 - **Real Speed Testing**: Actual data transfer measurement for accurate results
 - **Modern UI**: Glass morphism design with dark blue gradient background
-- **Real-time Updates**: Live progress tracking via Server-Sent Events (SSE)
+- **Real-time Updates**: Live progress tracking driven by in-browser measurements
 - **Responsive Design**: Works perfectly on desktop and mobile devices
 - **Educational Content**: Built-in explanations of how speed tests work
 - **Docker Ready**: Easy deployment with Docker and Docker Compose
@@ -68,9 +68,9 @@ docker run -p 3000:3000 ghcr.io/yourusername/speedtest:latest
 
 The speed test performs three phases:
 
-1. **Ping Test**: Measures round-trip latency to the server
-2. **Download Test**: Downloads test data in progressive chunks (512KB, 1MB, 2MB)
-3. **Upload Test**: Uploads generated test data to measure upload speeds
+1. **Ping Test**: Measures round-trip latency to the server using multiple attempts with outlier trimming
+2. **Download Test**: Downloads test data in progressive chunks (1MB, 2MB, 4MB) while streaming to capture real-time throughput
+3. **Upload Test**: Uploads progressively larger buffers (512KB, 1MB, 2MB) and measures the transfer rate from the browser
 
 All tests use real data transfer for accurate network performance measurements.
 
@@ -98,7 +98,7 @@ The application includes a health check endpoint at `/api/ping` for monitoring c
 - **Framework**: Next.js 14 with App Router
 - **Styling**: Tailwind CSS with custom glassmorphism components
 - **TypeScript**: Full type safety
-- **Real-time**: Server-Sent Events (SSE)
+- **Real-time**: Client-side streaming measurements
 - **Deployment**: Docker with multi-stage builds
 
 ### Project Structure
@@ -106,7 +106,6 @@ The application includes a health check endpoint at `/api/ping` for monitoring c
 ```
 ├── app/
 │   ├── api/
-│   │   ├── speedtest/    # SSE endpoint for speed tests
 │   │   ├── download/     # Download test data endpoint
 │   │   ├── upload/       # Upload test endpoint
 │   │   └── ping/         # Ping/health check endpoint
