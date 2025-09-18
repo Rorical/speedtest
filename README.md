@@ -68,9 +68,9 @@ docker run -p 3000:3000 ghcr.io/yourusername/speedtest:latest
 
 The speed test performs three phases:
 
-1. **Ping Test**: Measures round-trip latency to the server using multiple attempts with outlier trimming
-2. **Download Test**: Downloads test data in progressive chunks (1MB, 2MB, 4MB) while streaming to capture real-time throughput
-3. **Upload Test**: Uploads progressively larger buffers (512KB, 1MB, 2MB) and measures the transfer rate from the browser
+1. **Ping Test**: Issues several latency probes and trims outliers before reporting the final average.
+2. **Download Test**: Streams pseudo-random data in 8MB chunks until both time and volume thresholds are met, collecting multiple passes and trimming outliers for a stable reading.
+3. **Upload Test**: Posts randomized binary payloads repeatedly until time and byte targets are satisfied, combining several passes into a trimmed average.
 
 All tests use real data transfer for accurate network performance measurements.
 
